@@ -1,0 +1,256 @@
+
+---
+title: "Loan Recipient Pattern Analysis (R)"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+# Overview
+
+This notebook explores patterns in small-business **loan approvals** using an anonymized dataset.  
+The dependent variable is `Funded` (1 = approved/funded, 0 = not funded).  
+We examine relationships between approval outcomes and features such as **requested amount, annual revenue, business age, demographics, location, and referral sources**.
+
+> Packages: `tidyverse`, `janitor`, `skimr`, `ggplot2`, `broom`, `knitr`, `readr`, `readxl`
+
+## 0) Setup
+
+```r
+# Install packages once (uncomment if needed)
+# install.packages(c("tidyverse", "janitor", "skimr", "broom", "readxl"))
+
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(broom)
+library(readr)
+library(readxl)
+library(knitr)
+```
+
+## 1) Load Data
+
+The code below first tries to load a CSV from `data/loan_recipient_patterns.csv`.  
+If not found, it falls back to reading an Excel file and then **writes a CSV** for reproducibility.
+
+```r
+# Paths (edit these for your local environment)
+csv_path   <- "data/loan_recipient_patterns.csv"
+excel_path <- "data/dissstrategycase1227.342a.xlsx"  # optional fallback if you have the Excel
+
+if (file.exists(csv_path)) {
+  df_raw <- read_csv(csv_path, show_col_types = FALSE)
+} else if (file.exists(excel_path)) {
+  df_raw <- read_excel(excel_path, sheet = 1)
+  dir.create("data", showWarnings = FALSE, recursive = TRUE)
+  write_csv(df_raw, csv_path) # persist a CSV version for the repo
+  message("Saved CSV to ", csv_path)
+} else {
+  stop("No data found. Place a CSV at data/loan_recipient_patterns.csv or Excel at data/dissstrategycase1227.342a.xlsx")
+}
+
+# Peek
+glimpse(df_raw)
+df_raw %>% head() %>% kable()
+```
+
+## 2) Clean & Standardize
+
+- Normalize column names
+- Coerce types
+- Define key features
+- Create quick derived variables where helpful (e.g., log of revenue/amount)
+
+```r
+df <- df_raw %>%
+  janitor::clean_names() %>%
+  mutate(
+    # Standardize target
+    funded = as.integer(funded),
+    funded = if_else(is.na(funded), NA_integer_, funded),
+
+    # Numeric coercions (safe)
+    loan_amount      = suppressWarnings(as.numeric(loan_amount)),
+    request_loan_amt = suppressWarnings(as.numeric(request_loan_amt)),
+    req_amt          = suppressWarnings(as.numeric(req_amt)),
+    annual_gross     = suppressWarnings(as.numeric(annual_gross)),
+    age_of_business  = suppressWarnings(as.numeric(ageofbusiness)),
+
+    # Categorical cleanup
+    race   = as.character(race),
+    gender = as.character(gender),
+    city   = as.character(city),
+    metro  = as.character(metro),
+
+    # Derivatives
+    log_annual_gross = log1p(annual_gross),
+    log_req_amt      = log1p(coalesce(request_loan_amt, req_amt, loan_amount))
+  )
+
+# Basic sanity checks
+skim(df)
+```
+
+### Handle categorical harmonization
+
+```r
+# Harmonize gender
+df <- df %>%
+  mutate(
+    gender_simplified = case_when(
+      str_detect(str_to_lower(gender %||% ""), "fem") ~ "Female",
+      str_detect(str_to_lower(gender %||% ""), "male") ~ "Male",
+      TRUE ~ "Other/Unknown"
+    ),
+    race_simplified = case_when(
+      str_detect(str_to_lower(race %||% ""), "black|african") ~ "Black",
+      str_detect(str_to_lower(race %||% ""), "white|cauc") ~ "White",
+      str_detect(str_to_lower(race %||% ""), "latino|hisp") ~ "Latino",
+      str_detect(str_to_lower(race %||% ""), "asian") ~ "Asian",
+      TRUE ~ "Other/Unknown"
+    )
+  )
+```
+
+## 3) Exploratory Analysis
+
+### Outcome distribution
+
+```r
+df %>%
+  count(funded) %>%
+  mutate(p = scales::percent(n/sum(n))) %>%
+  kable(caption = "Funded outcome distribution")
+```
+
+### Numeric summaries
+
+```r
+df %>%
+  select(funded, age_of_business, annual_gross, request_loan_amt, req_amt, loan_amount) %>%
+  summary() %>%
+  capture.output() %>%
+  paste(collapse = "\n") %>%
+  cat()
+```
+
+### Grouped views (by demographics & business features)
+
+```r
+df %>%
+  group_by(gender_simplified) %>%
+  summarize(
+    n = n(),
+    fund_rate = mean(funded, na.rm = TRUE)
+  ) %>%
+  arrange(desc(fund_rate)) %>%
+  kable(caption = "Funding rate by gender")
+
+df %>%
+  group_by(race_simplified) %>%
+  summarize(
+    n = n(),
+    fund_rate = mean(funded, na.rm = TRUE)
+  ) %>%
+  arrange(desc(fund_rate)) %>%
+  kable(caption = "Funding rate by race")
+
+df %>%
+  mutate(req_amt_any = coalesce(request_loan_amt, req_amt, loan_amount)) %>%
+  group_by(funded) %>%
+  summarize(
+    n = n(),
+    mean_req = mean(req_amt_any, na.rm = TRUE),
+    median_req = median(req_amt_any, na.rm = TRUE),
+    mean_revenue = mean(annual_gross, na.rm = TRUE),
+    median_revenue = median(annual_gross, na.rm = TRUE)
+  ) %>%
+  kable(caption = "Request & revenue by funding outcome")
+```
+
+### Visualizations
+
+```r
+library(ggplot2)
+
+df %>%
+  mutate(req_amt_any = coalesce(request_loan_amt, req_amt, loan_amount)) %>%
+  ggplot(aes(x = req_amt_any, fill = factor(funded))) +
+  geom_histogram(bins = 30, alpha = 0.6, position = "identity") +
+  labs(x = "Requested Amount (any)", fill = "Funded", title = "Distribution of Requested Amount by Outcome") +
+  theme_minimal()
+
+df %>%
+  ggplot(aes(x = age_of_business, y = annual_gross)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Business Age vs Annual Revenue") +
+  theme_minimal()
+```
+
+## 4) Modeling: Logistic Regression
+
+We estimate a simple logistic regression:
+
+\[
+\texttt{Funded} \sim \log(\texttt{RequestAmt}) + \log(\texttt{AnnualGross}) + \texttt{AgeOfBusiness} + \texttt{Race} + \texttt{Gender} + \texttt{Metro}
+\]
+
+```r
+df_model <- df %>%
+  mutate(
+    req_amt_any = coalesce(request_loan_amt, req_amt, loan_amount),
+    metro_fac   = factor(metro),
+    gender_fac  = factor(gender_simplified),
+    race_fac    = factor(race_simplified)
+  ) %>%
+  filter(!is.na(funded)) %>%
+  filter(!is.na(req_amt_any) & !is.na(annual_gross) & !is.na(age_of_business))
+
+m1 <- glm(funded ~ log1p(req_amt_any) + log1p(annual_gross) + age_of_business +
+            race_fac + gender_fac + metro_fac,
+          data = df_model,
+          family = binomial(link = "logit"))
+
+summary(m1)
+
+# Tidy coefficients with odds ratios
+m1_tidy <- broom::tidy(m1, exponentiate = TRUE, conf.int = TRUE)
+kable(m1_tidy, digits = 3, caption = "Logistic regression (odds ratios)")
+```
+
+### Simple performance snapshot
+
+```r
+df_model$pred_prob <- predict(m1, type = "response")
+df_model$pred_class <- if_else(df_model$pred_prob >= 0.5, 1L, 0L)
+
+acc <- mean(df_model$pred_class == df_model$funded)
+roc_like <- cor(df_model$funded, df_model$pred_prob, use = "complete.obs")
+
+kable(
+  tibble(
+    accuracy_threshold_0_5 = round(acc, 3),
+    corr_prob_with_outcome = round(roc_like, 3)
+  ),
+  caption = "Simple performance metrics (non-cross-validated)"
+)
+```
+
+> Note: This is a **baseline** model for illustration; consider proper train/test splits, cross-validation, class imbalance handling, and robustness checks in production contexts.
+
+## 5) Save Artifacts
+
+```r
+dir.create("outputs", showWarnings = FALSE)
+readr::write_csv(m1_tidy, "outputs/model_logit_odds_ratios.csv")
+readr::write_csv(df_model %>% select(funded, pred_prob, pred_class), "outputs/predictions.csv")
+```
+
+## 6) Session Info
+
+```r
+sessionInfo()
+```
